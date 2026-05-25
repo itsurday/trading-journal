@@ -1,0 +1,11 @@
+symbol,date,order type,side,fees,quantity,average price
+AAPL,2026-05-01T09:35:00Z,market,buy,0,50,182.50
+AAPL,2026-05-08T14:20:00Z,market,sell,0,50,191.20
+TSLA,2026-05-05T10:05:00Z,market,sell,0,30,175.00
+TSLA,2026-05-12T11:45:00Z,market,buy,0,30,162.30
+NVDA,2026-05-10T09:31:00Z,market,buy,0,20,875.00
+NVDA,2026-05-18T15:55:00Z,market,sell,0,20,920.50
+AMD,2026-05-03T09:45:00Z,market,buy,0,60,152.00
+AMD,2026-05-09T13:30:00Z,market,sell,0,60,168.40
+META,2026-05-20T10:00:00Z,market,buy,0,40,498.00
+COIN,2026-05-20T10:15:00Z,market,buy,0,25,210.00
