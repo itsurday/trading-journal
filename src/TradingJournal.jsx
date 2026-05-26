@@ -5,13 +5,11 @@ const SETUPS   = ["Breakout","Reversal","Earnings Play","Sector Rotation","Macro
 const EMOTIONS = ["Confident","Neutral","Excited","Fearful","Frustrated","Calm"];
 const ALL_TAGS = ["momentum","reversal","earnings","tech","hedge","index","breakout","swing"];
 
-const FIDELITY_SAMPLE = `Run Date,Account,Action,Symbol,Description,Type,Quantity,Price ($),Commission ($),Fees ($),Amount ($),Cash Balance ($),Settlement Date
-05/01/2026,Individual ...1234,YOU BOUGHT,AAPL,APPLE INC,Cash,50,182.50,0.00,0.00,-9125.00,45875.00,05/03/2026
-05/08/2026,Individual ...1234,YOU SOLD,AAPL,APPLE INC,Cash,50,191.20,0.00,0.00,9560.00,55435.00,05/10/2026
-05/05/2026,Individual ...1234,YOU SOLD SHORT,TSLA,TESLA INC,Cash,30,175.00,0.00,0.00,5250.00,60685.00,05/07/2026
-05/12/2026,Individual ...1234,YOU BOUGHT TO COVER,TSLA,TESLA INC,Cash,30,162.30,0.00,0.00,-4869.00,55816.00,05/14/2026
-05/10/2026,Individual ...1234,YOU BOUGHT,NVDA,NVIDIA CORP,Cash,20,875.00,0.00,0.00,-17500.00,38316.00,05/12/2026
-05/18/2026,Individual ...1234,YOU SOLD,NVDA,NVIDIA CORP,Cash,20,920.50,0.00,0.00,18410.00,56726.00,05/20/2026`;
+const FIDELITY_SAMPLE = `Run Date,Account,Account Number,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date
+03/11/2026,"Individual - TOD","Z12345","YOU BOUGHT",AAPL,"APPLE INC",Cash,182.50,50,,,,−9125.00,03/13/2026
+03/18/2026,"Individual - TOD","Z12345","YOU SOLD",AAPL,"APPLE INC",Cash,191.20,50,,,,9560.00,03/20/2026
+03/05/2026,"Individual - TOD","Z12345","YOU SOLD SHORT SALE TSLA (Short)",TSLA,"TESLA INC",Short,175.00,-25,,,,4375.00,03/07/2026
+03/12/2026,"Individual - TOD","Z12345","YOU BOUGHT TO COVER",TSLA,"TESLA INC",Short,162.30,25,,,,−4057.50,03/14/2026`;
 
 const ROBINHOOD_SAMPLE = `symbol,date,order type,side,fees,quantity,average price
 AAPL,2026-05-01T09:35:00Z,market,buy,0,50,182.50
@@ -21,6 +19,7 @@ TSLA,2026-05-12T11:45:00Z,market,buy,0,30,162.30
 NVDA,2026-05-10T09:31:00Z,market,buy,0,20,875.00
 NVDA,2026-05-18T15:55:00Z,market,sell,0,20,920.50`;
 
+// ─── CSV Parsing ──────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const result = []; let cur = "", inQ = false;
   for (let i = 0; i < line.length; i++) {
@@ -30,18 +29,58 @@ function parseCSVLine(line) {
   }
   result.push(cur.trim()); return result;
 }
+
 function parseCSV(text) {
-  const lines = text.trim().split('\n').filter(l => l.trim());
-  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[$()]/g,'').trim());
-  const rows = lines.slice(1).map(l => { const vals = parseCSVLine(l); return Object.fromEntries(headers.map((h,i) => [h, (vals[i]||'').trim()])); });
+  // Strip BOM, normalize line endings
+  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const allLines = clean.split('\n');
+
+  // Find the header line — the first line containing a comma that looks like headers
+  // Fidelity files have blank lines at the top before the real header row
+  let headerIdx = -1;
+  for (let i = 0; i < allLines.length; i++) {
+    const l = allLines[i].trim();
+    if (l && l.toLowerCase().includes('run date') && l.toLowerCase().includes('action')) {
+      headerIdx = i; break;
+    }
+    // Robinhood: look for 'symbol' and 'side'
+    if (l && l.toLowerCase().includes('symbol') && l.toLowerCase().includes('side')) {
+      headerIdx = i; break;
+    }
+  }
+  if (headerIdx === -1) {
+    // fallback: first non-empty line
+    headerIdx = allLines.findIndex(l => l.trim().length > 0);
+  }
+
+  const headerLine = allLines[headerIdx];
+  const headers = parseCSVLine(headerLine).map(h =>
+    h.toLowerCase().replace(/[$()]/g,'').replace(/\s+/g,' ').trim()
+  );
+
+  // Data rows: only lines after the header that start with a date pattern (MM/DD/YYYY)
+  // This automatically skips the disclaimer block at the bottom of Fidelity files
+  const rows = [];
+  for (let i = headerIdx + 1; i < allLines.length; i++) {
+    const l = allLines[i].trim();
+    if (!l) continue;
+    // Fidelity data rows always start with a date like 03/11/2026
+    // Robinhood rows start with a ticker symbol
+    // Disclaimer rows start with quotes or words — skip them
+    if (!l.match(/^["']?\d{1,2}\/\d{1,2}\/\d{4}/) && !l.match(/^[A-Z]{1,6},/)) continue;
+    const vals = parseCSVLine(l);
+    rows.push(Object.fromEntries(headers.map((h, i) => [h, (vals[i] || '').trim()])));
+  }
   return { headers, rows };
 }
+
 function detectBroker(headers) {
   const h = headers.join('|');
   if (h.includes('run date') && h.includes('action') && h.includes('symbol')) return 'fidelity';
   if (h.includes('average price') && h.includes('side') && h.includes('symbol')) return 'robinhood';
   return 'unknown';
 }
+
 function toISO(dateStr) {
   if (!dateStr) return '';
   const mdy = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
@@ -50,17 +89,41 @@ function toISO(dateStr) {
   if (iso) return iso[1];
   return dateStr.slice(0,10);
 }
-function cleanNum(s) { return parseFloat((s||'').replace(/[$,\s]/g,'')) || 0; }
+
+function cleanNum(s) {
+  // Handle various number formats including unicode minus sign and parentheses for negatives
+  if (!s) return 0;
+  const cleaned = s.replace(/[^\d.\-]/g, '').replace(/−/g, '-');
+  return parseFloat(cleaned) || 0;
+}
+
 function parseFidelity(rows) {
   const buys = {}, sells = {};
   rows.forEach(r => {
-    const action = (r['action']||'').toLowerCase(), sym = (r['symbol']||'').trim().toUpperCase();
+    // Action field may contain verbose descriptions like
+    // "YOU SOLD SHORT SALE SANDISK CORP COM (SNDK) (Short)"
+    // "YOU BOUGHT TO COVER"
+    // "YOU BOUGHT"
+    // "YOU SOLD"
+    const action = (r['action'] || '').toLowerCase();
+    const sym    = (r['symbol'] || '').trim().toUpperCase();
     if (!sym || sym.length > 6 || !sym.match(/^[A-Z]/)) return;
-    const qty = Math.abs(cleanNum(r['quantity'])), price = cleanNum(r['price']||r['price ']), date = toISO(r['run date']||r['settlement date']||'');
+
+    // In the real Fidelity export: Price ($) comes before Quantity
+    // Column header normalised to 'price' and 'quantity'
+    const price = Math.abs(cleanNum(r['price'] || r['price '] || ''));
+    // Quantity can be negative (sells shown as -25), take absolute value
+    const qty   = Math.abs(cleanNum(r['quantity'] || ''));
+    const date  = toISO(r['run date'] || r['settlement date'] || '');
+
     if (!price || !qty || !date) return;
-    const isBuy = action.includes('bought') && !action.includes('cover');
-    const isSell = action.includes('sold') && !action.includes('short');
-    const isShortSell = action.includes('sold short'), isShortCover = action.includes('cover');
+
+    // Classify the action — order matters (check more specific first)
+    const isShortCover = action.includes('cover');
+    const isShortSell  = action.includes('short') && action.includes('sold') && !isShortCover;
+    const isBuy        = action.includes('bought') && !isShortCover;
+    const isSell       = action.includes('sold')   && !isShortSell && !isShortCover;
+
     const entry = { sym, qty, price, date };
     if (isBuy)        { (buys[sym]  = buys[sym] ||[]).push({...entry, direction:'LONG'});  }
     if (isSell)       { (sells[sym] = sells[sym]||[]).push({...entry, direction:'LONG'});  }
@@ -69,12 +132,16 @@ function parseFidelity(rows) {
   });
   return matchLegs(buys, sells);
 }
+
 function parseRobinhood(rows) {
   const buys = {}, sells = {};
   rows.forEach(r => {
-    const sym = (r['symbol']||r['ticker symbol']||'').trim().toUpperCase();
+    const sym   = (r['symbol'] || r['ticker symbol'] || '').trim().toUpperCase();
     if (!sym || sym.length > 6 || !sym.match(/^[A-Z]/)) return;
-    const side = (r['side']||'').toLowerCase(), qty = cleanNum(r['quantity']||r['order quantity']), price = cleanNum(r['average price']||r['price']), date = toISO(r['date']||r['order created at']||'');
+    const side  = (r['side'] || '').toLowerCase();
+    const qty   = Math.abs(cleanNum(r['quantity'] || r['order quantity']));
+    const price = Math.abs(cleanNum(r['average price'] || r['price']));
+    const date  = toISO(r['date'] || r['order created at'] || '');
     if (!price || !qty || !date) return;
     const entry = { sym, qty, price, date, direction:'LONG' };
     if (side === 'buy')  { (buys[sym]  = buys[sym] ||[]).push(entry); }
@@ -82,6 +149,7 @@ function parseRobinhood(rows) {
   });
   return matchLegs(buys, sells);
 }
+
 function matchLegs(buys, sells) {
   const trades = [], allSyms = new Set([...Object.keys(buys), ...Object.keys(sells)]);
   allSyms.forEach(sym => {
@@ -246,7 +314,7 @@ function TradeModal({ trade, onSave, onDelete, onClose, saving }) {
 function CSVImportModal({ existingTrades, onImport, onClose }) {
   const [step,setStep]=useState('upload'),[broker,setBroker]=useState(null),[parsedTrades,setParsed]=useState([]),[selected,setSelected]=useState(new Set()),[error,setError]=useState(''),[dragging,setDragging]=useState(false),[activeTab,setActiveTab]=useState('upload'),[pasteText,setPasteText]=useState(''),[importing,setImporting]=useState(false);
   const fileRef=useRef();
-  const processText=useCallback((text)=>{setError('');try{const {headers,rows}=parseCSV(text);const detected=detectBroker(headers);if(detected==='unknown'){setError('Could not detect broker. Expected Fidelity or Robinhood CSV headers.');return;}let trades=detected==='fidelity'?parseFidelity(rows):parseRobinhood(rows);if(trades.length===0){setError('No valid trades found.');return;}const existingKeys=new Set(existingTrades.map(t=>`${t.ticker}-${t.entry_date}-${t.entry_price}`));trades=trades.map(t=>({...t,duplicate:existingKeys.has(`${t.ticker}-${t.entry_date}-${t.entry_price}`)}));setBroker(detected);setParsed(trades);setSelected(new Set(trades.map((_,i)=>i).filter(i=>!trades[i].duplicate)));setStep('preview');}catch(e){setError('Parse error: '+e.message);}},[existingTrades]);
+  const processText=useCallback((text)=>{setError('');try{const {headers,rows}=parseCSV(text);const detected=detectBroker(headers);if(detected==='unknown'){setError('Could not detect broker. Expected Fidelity or Robinhood CSV headers.');return;}let trades=detected==='fidelity'?parseFidelity(rows):parseRobinhood(rows);if(trades.length===0){setError('No valid trades found. Make sure your CSV contains buy/sell transactions.');return;}const existingKeys=new Set(existingTrades.map(t=>`${t.ticker}-${t.entry_date}-${t.entry_price}`));trades=trades.map(t=>({...t,duplicate:existingKeys.has(`${t.ticker}-${t.entry_date}-${t.entry_price}`)}));setBroker(detected);setParsed(trades);setSelected(new Set(trades.map((_,i)=>i).filter(i=>!trades[i].duplicate)));setStep('preview');}catch(e){setError('Parse error: '+e.message);}},[existingTrades]);
   const handleFile=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>processText(ev.target.result);r.readAsText(f);};
   const handleDrop=useCallback(e=>{e.preventDefault();setDragging(false);const f=e.dataTransfer.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>processText(ev.target.result);r.readAsText(f);},[processText]);
   const toggleRow=i=>setSelected(s=>{const n=new Set(s);n.has(i)?n.delete(i):n.add(i);return n;});
@@ -262,27 +330,30 @@ function CSVImportModal({ existingTrades, onImport, onClose }) {
             <button onClick={onClose} style={{background:'none',border:'none',color:T.muted,fontSize:22,cursor:'pointer'}}>&#x2715;</button>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:6}}>
-            {[['Upload','upload'],['Preview','preview'],['Done','done']].map(([label,id],i)=>{const active=step===id,past={'upload':0,'preview':1,'done':2}[step]>{'upload':0,'preview':1,'done':2}[id];return<div key={id} style={{display:'flex',alignItems:'center',gap:6}}><div style={{width:26,height:26,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,background:active||past?'linear-gradient(135deg,#6366f1,#8b5cf6)':T.sub,color:active||past?'#fff':T.muted}}>{past?'&#10003;':i+1}</div><span style={{fontSize:12,fontWeight:600,color:active?T.text:T.muted}}>{label}</span>{i<2&&<div style={{width:28,height:1,background:T.border}}/>}</div>;})}
+            {[['Upload','upload'],['Preview','preview'],['Done','done']].map(([label,id],i)=>{const active=step===id,past={'upload':0,'preview':1,'done':2}[step]>{'upload':0,'preview':1,'done':2}[id];return<div key={id} style={{display:'flex',alignItems:'center',gap:6}}><div style={{width:26,height:26,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,background:active||past?'linear-gradient(135deg,#6366f1,#8b5cf6)':T.sub,color:active||past?'#fff':T.muted}}>{past?'✓':i+1}</div><span style={{fontSize:12,fontWeight:600,color:active?T.text:T.muted}}>{label}</span>{i<2&&<div style={{width:28,height:1,background:T.border}}/>}</div>;})}
           </div>
         </div>
         <div style={{padding:32,flex:1}}>
           {step==='upload'&&<>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:24}}>
-              {[{id:'fidelity',name:'Fidelity',icon:'&#127974;',steps:['Accounts &amp; Trade &#8594; Activity &amp; Orders &#8594; History','Select date range &#8594; Download CSV'],headers:'Run Date, Action, Symbol, Quantity, Price ($)...'},{id:'robinhood',name:'Robinhood',icon:'&#129001;',steps:['Account &#8594; Statements &amp; History &#8594; History','Select date range &#8594; Export CSV'],headers:'symbol, date, side, quantity, average price...'}].map(b=>(
+              {[
+                {id:'fidelity',name:'Fidelity',icon:'🏦',steps:['Accounts & Trade → Activity & Orders → History','Select date range → Download CSV'],headers:'Run Date, Account Number, Action, Symbol, Price ($), Quantity...'},
+                {id:'robinhood',name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV'],headers:'symbol, date, side, quantity, average price...'}
+              ].map(b=>(
                 <div key={b.id} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:12,padding:18}}>
-                  <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><span style={{fontSize:22}} dangerouslySetInnerHTML={{__html:b.icon}}/><div style={{fontSize:14,fontWeight:700,color:T.text}}>{b.name}</div></div>
-                  <ol style={{paddingLeft:16,margin:0}}>{b.steps.map((s,i)=><li key={i} style={{fontSize:11,color:T.muted,marginBottom:4,lineHeight:1.5}} dangerouslySetInnerHTML={{__html:s}}/>)}</ol>
+                  <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><span style={{fontSize:22}}>{b.icon}</span><div style={{fontSize:14,fontWeight:700,color:T.text}}>{b.name}</div></div>
+                  <ol style={{paddingLeft:16,margin:0}}>{b.steps.map((s,i)=><li key={i} style={{fontSize:11,color:T.muted,marginBottom:4,lineHeight:1.5}}>{s}</li>)}</ol>
                   <div style={{marginTop:10,padding:'8px 10px',background:T.panel,borderRadius:6,border:`1px solid ${T.border}`}}><code style={{fontSize:10,color:T.purple}}>{b.headers}</code></div>
                 </div>
               ))}
             </div>
             <div style={{display:'flex',gap:2,background:T.sub,borderRadius:10,padding:4,marginBottom:20,width:'fit-content'}}>
-              {[['upload','&#128193; Upload'],['paste','&#128203; Paste'],['sample','&#129514; Sample']].map(([id,label])=>(<button key={id} onClick={()=>setActiveTab(id)} style={{padding:'8px 16px',border:'none',borderRadius:7,cursor:'pointer',fontSize:12,fontWeight:600,background:activeTab===id?T.panel:'transparent',color:activeTab===id?T.text:T.muted}} dangerouslySetInnerHTML={{__html:label}}/>))}
+              {[['upload','📁 Upload'],['paste','📋 Paste'],['sample','🧪 Sample']].map(([id,label])=>(<button key={id} onClick={()=>setActiveTab(id)} style={{padding:'8px 16px',border:'none',borderRadius:7,cursor:'pointer',fontSize:12,fontWeight:600,background:activeTab===id?T.panel:'transparent',color:activeTab===id?T.text:T.muted}}>{label}</button>))}
             </div>
             {activeTab==='upload'&&(
               <div onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)} onDrop={handleDrop} style={{border:`2px dashed ${dragging?'#6366f1':T.border}`,borderRadius:14,padding:'48px 24px',textAlign:'center',background:dragging?'rgba(99,102,241,0.06)':T.sub,cursor:'pointer'}} onClick={()=>fileRef.current.click()}>
                 <input ref={fileRef} type="file" accept=".csv,.txt" style={{display:'none'}} onChange={handleFile}/>
-                <div style={{fontSize:40,marginBottom:12}}>&#128194;</div>
+                <div style={{fontSize:40,marginBottom:12}}>📂</div>
                 <div style={{fontSize:15,fontWeight:600,color:T.text,marginBottom:6}}>Drop your CSV here</div>
                 <div style={{fontSize:12,color:T.muted,marginBottom:18}}>or click to browse</div>
                 <button style={BtnPrimary} onClick={e=>{e.stopPropagation();fileRef.current.click();}}>Choose File</button>
@@ -293,26 +364,26 @@ function CSVImportModal({ existingTrades, onImport, onClose }) {
                 <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)} placeholder="Paste your CSV content here..." style={{...IS,minHeight:200,resize:'vertical',fontFamily:'monospace',fontSize:11}}/>
                 <div style={{display:'flex',justifyContent:'flex-end',marginTop:12,gap:10}}>
                   <button onClick={()=>setPasteText('')} style={BtnGhost}>Clear</button>
-                  <button onClick={()=>processText(pasteText)} style={BtnPrimary} disabled={!pasteText.trim()}>Parse &#8594;</button>
+                  <button onClick={()=>processText(pasteText)} style={BtnPrimary} disabled={!pasteText.trim()}>Parse →</button>
                 </div>
               </div>
             )}
             {activeTab==='sample'&&(
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-                {[{label:'&#127974; Fidelity',data:FIDELITY_SAMPLE},{label:'&#129001; Robinhood',data:ROBINHOOD_SAMPLE}].map(s=>(
+                {[{label:'🏦 Fidelity',data:FIDELITY_SAMPLE},{label:'🟢 Robinhood',data:ROBINHOOD_SAMPLE}].map(s=>(
                   <div key={s.label} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:12,padding:18}}>
-                    <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:8}} dangerouslySetInnerHTML={{__html:s.label}}/>
+                    <div style={{fontSize:13,fontWeight:700,color:T.text,marginBottom:8}}>{s.label}</div>
                     <pre style={{fontSize:10,color:T.dim,overflowX:'auto',marginBottom:14,lineHeight:1.6,background:T.panel,padding:'8px 10px',borderRadius:6}}>{s.data.split('\n').slice(0,3).join('\n')}...</pre>
-                    <button style={{...BtnPrimary,width:'100%',fontSize:12}} onClick={()=>processText(s.data)}>Load Sample &#8594;</button>
+                    <button style={{...BtnPrimary,width:'100%',fontSize:12}} onClick={()=>processText(s.data)}>Load Sample →</button>
                   </div>
                 ))}
               </div>
             )}
-            {error&&<div style={{marginTop:16,padding:'12px 16px',background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:8,color:T.red,fontSize:13}}>&#9888;&#65039; {error}</div>}
+            {error&&<div style={{marginTop:16,padding:'12px 16px',background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',borderRadius:8,color:T.red,fontSize:13}}>⚠️ {error}</div>}
           </>}
           {step==='preview'&&<>
             <div style={{display:'flex',gap:12,marginBottom:20,flexWrap:'wrap'}}>
-              {[{label:'Broker',value:broker==='fidelity'?'Fidelity':'Robinhood',color:T.purple},{label:'Total',value:parsedTrades.length},{label:'New',value:newCount,color:T.green},{label:'Duplicates',value:dupCount,color:T.muted},{label:'Selected',value:selected.size,color:T.blue}].map(s=>(
+              {[{label:'Broker',value:broker==='fidelity'?'🏦 Fidelity':'🟢 Robinhood',color:T.purple},{label:'Total',value:parsedTrades.length},{label:'New',value:newCount,color:T.green},{label:'Duplicates',value:dupCount,color:T.muted},{label:'Selected',value:selected.size,color:T.blue}].map(s=>(
                 <div key={s.label} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:10,padding:'12px 16px',flex:1,minWidth:90}}>
                   <div style={{fontSize:10,color:T.muted,fontWeight:600,textTransform:'uppercase',marginBottom:4}}>{s.label}</div>
                   <div style={{fontSize:20,fontWeight:700,color:s.color||T.text}}>{s.value}</div>
@@ -343,20 +414,20 @@ function CSVImportModal({ existingTrades, onImport, onClose }) {
                 ))}
               </div>
             </div>
-            <div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:12,color:'#a5b4fc'}}>&#128190; Trades will be saved permanently to your account.</div>
+            <div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:8,padding:'10px 14px',marginBottom:20,fontSize:12,color:'#a5b4fc'}}>💾 Trades will be saved permanently to your account.</div>
             <div style={{display:'flex',gap:12,justifyContent:'space-between'}}>
-              <button onClick={()=>setStep('upload')} style={BtnGhost}>&#8592; Back</button>
+              <button onClick={()=>setStep('upload')} style={BtnGhost}>← Back</button>
               <button onClick={doImport} disabled={selected.size===0||importing} style={{...BtnPrimary,opacity:(selected.size===0||importing)?0.5:1}}>{importing?'Saving...':'Import & Save →'}</button>
             </div>
           </>}
           {step==='done'&&(
             <div style={{textAlign:'center',padding:'40px 0'}}>
-              <div style={{fontSize:60,marginBottom:16}}>&#127881;</div>
+              <div style={{fontSize:60,marginBottom:16}}>🎉</div>
               <h3 style={{fontSize:22,fontWeight:700,color:T.text,marginBottom:10}}>Import Complete!</h3>
               <p style={{fontSize:14,color:T.muted,marginBottom:32}}>{selected.size} trade{selected.size!==1?'s were':' was'} saved to your account.</p>
               <div style={{display:'flex',gap:12,justifyContent:'center'}}>
                 <button onClick={()=>{setStep('upload');setParsed([]);setSelected(new Set());setBroker(null);setError('');setPasteText('');}} style={BtnGhost}>Import More</button>
-                <button onClick={onClose} style={BtnPrimary}>View Journal &#8594;</button>
+                <button onClick={onClose} style={BtnPrimary}>View Journal →</button>
               </div>
             </div>
           )}
@@ -445,27 +516,24 @@ export default function TradingJournal({ session }) {
     <div style={{display:'flex',height:'100vh',background:T.bg,fontFamily:"'Inter',system-ui,sans-serif",color:T.text,overflow:'hidden'}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');*{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:${T.bg}}::-webkit-scrollbar-thumb{background:#1e2535;border-radius:3px}input,select,textarea{font-family:inherit}input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.4)}.tr:hover{background:#131720!important}.tr{cursor:pointer;transition:background .1s}.nb:hover{background:rgba(99,102,241,0.08)!important;color:#94a3b8!important}@keyframes fu{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.fu{animation:fu .22s ease}.so-btn:hover{background:rgba(248,113,113,0.1)!important;color:#f87171!important;border-color:rgba(248,113,113,0.4)!important}`}</style>
 
-      {/* ── Sidebar ── */}
       <aside style={{width:220,background:T.sub,borderRight:`1px solid ${T.border}`,display:'flex',flexDirection:'column',flexShrink:0,padding:'0 12px'}}>
         <div style={{padding:'22px 8px 20px',borderBottom:`1px solid ${T.border}`}}>
           <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <div style={{width:32,height:32,background:'linear-gradient(135deg,#6366f1,#8b5cf6)',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>&#128200;</div>
+            <div style={{width:32,height:32,background:'linear-gradient(135deg,#6366f1,#8b5cf6)',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16}}>📈</div>
             <div><div style={{fontSize:14,fontWeight:800,letterSpacing:'-0.02em',color:T.text}}>TradeLog</div><div style={{fontSize:10,color:T.dim}}>Pro Journal</div></div>
           </div>
         </div>
         <nav style={{flex:1,padding:'16px 0',display:'flex',flexDirection:'column',gap:2}}>
           <div style={{fontSize:10,color:T.dim,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',padding:'8px 12px 4px'}}>Overview</div>
-          <NavItem icon="&#9638;" label="Dashboard"  active={page==='dashboard'} onClick={()=>setPage('dashboard')}/>
-          <NavItem icon="&#128197;" label="Calendar" active={page==='calendar'}  onClick={()=>setPage('calendar')}/>
+          <NavItem icon="▦"  label="Dashboard"  active={page==='dashboard'} onClick={()=>setPage('dashboard')}/>
+          <NavItem icon="📅" label="Calendar"   active={page==='calendar'}  onClick={()=>setPage('calendar')}/>
           <div style={{fontSize:10,color:T.dim,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',padding:'12px 12px 4px'}}>Trading</div>
-          <NavItem icon="&#128210;" label="Trade Log"  active={page==='log'}       onClick={()=>setPage('log')} badge={openCount||null}/>
-          <NavItem icon="&#128202;" label="Analytics"  active={page==='analytics'} onClick={()=>setPage('analytics')}/>
-          <NavItem icon="&#129504;" label="Psychology" active={page==='psychology'} onClick={()=>setPage('psychology')}/>
+          <NavItem icon="📒" label="Trade Log"  active={page==='log'}       onClick={()=>setPage('log')} badge={openCount||null}/>
+          <NavItem icon="📊" label="Analytics"  active={page==='analytics'} onClick={()=>setPage('analytics')}/>
+          <NavItem icon="🧠" label="Psychology" active={page==='psychology'} onClick={()=>setPage('psychology')}/>
           <div style={{fontSize:10,color:T.dim,fontWeight:700,letterSpacing:'0.1em',textTransform:'uppercase',padding:'12px 12px 4px'}}>Import</div>
-          <NavItem icon="&#128193;" label="Import CSV" active={page==='sync'}      onClick={()=>setPage('sync')} badge={importedCount||null}/>
+          <NavItem icon="📁" label="Import CSV" active={page==='sync'}      onClick={()=>setPage('sync')} badge={importedCount||null}/>
         </nav>
-
-        {/* ── User + Sign Out ── */}
         <div style={{padding:'12px 8px 16px',borderTop:`1px solid ${T.border}`}}>
           <div style={{background:T.panel,borderRadius:10,padding:12}}>
             <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
@@ -477,17 +545,13 @@ export default function TradingJournal({ session }) {
                 <div style={{fontSize:10,color:T.dim}}>{trades.length} trades</div>
               </div>
             </div>
-            <button
-              className="so-btn"
-              onClick={signOut}
-              style={{width:'100%',background:'none',border:`1px solid ${T.border}`,borderRadius:7,color:T.muted,fontSize:11,fontWeight:600,padding:'7px 0',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,transition:'all .15s'}}>
-              &#x2192;&#x2502; Sign Out
+            <button className="so-btn" onClick={signOut} style={{width:'100%',background:'none',border:`1px solid ${T.border}`,borderRadius:7,color:T.muted,fontSize:11,fontWeight:600,padding:'7px 0',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,transition:'all .15s'}}>
+              Sign Out
             </button>
           </div>
         </div>
       </aside>
 
-      {/* ── Main ── */}
       <main style={{flex:1,overflow:'auto',display:'flex',flexDirection:'column'}}>
         <div style={{background:T.sub,borderBottom:`1px solid ${T.border}`,padding:'14px 28px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
           <div>
@@ -495,24 +559,24 @@ export default function TradingJournal({ session }) {
             <p style={{fontSize:12,color:T.muted,marginTop:2}}>{SUBS[page]}</p>
           </div>
           <div style={{display:'flex',gap:10}}>
-            <button onClick={()=>setShowCSV(true)} style={{...BtnGhost,display:'flex',alignItems:'center',gap:6,fontSize:12,padding:'9px 16px'}}>&#128193; Import CSV</button>
+            <button onClick={()=>setShowCSV(true)} style={{...BtnGhost,display:'flex',alignItems:'center',gap:6,fontSize:12,padding:'9px 16px'}}>📁 Import CSV</button>
             <button onClick={()=>{setEditTrade(null);setShowTrade(true);}} style={{...BtnPrimary,display:'flex',alignItems:'center',gap:6,padding:'9px 18px'}}>+ Log Trade</button>
           </div>
         </div>
 
-        {dbError&&<div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',padding:'10px 28px',fontSize:12,color:T.red,display:'flex',justifyContent:'space-between',alignItems:'center'}}>&#9888; {dbError}<button onClick={()=>setDbError('')} style={{background:'none',border:'none',color:T.red,cursor:'pointer',fontSize:16}}>&#x2715;</button></div>}
+        {dbError&&<div style={{background:'rgba(248,113,113,0.1)',border:'1px solid rgba(248,113,113,0.3)',padding:'10px 28px',fontSize:12,color:T.red,display:'flex',justifyContent:'space-between',alignItems:'center'}}>⚠️ {dbError}<button onClick={()=>setDbError('')} style={{background:'none',border:'none',color:T.red,cursor:'pointer',fontSize:16}}>✕</button></div>}
 
         <div style={{flex:1,padding:28,overflow:'auto'}} className="fu" key={page}>
-          {loading&&<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:300}}><div style={{textAlign:'center'}}><div style={{fontSize:32,marginBottom:12}}>&#9203;</div><div style={{color:T.muted,fontSize:13}}>Loading your trades...</div></div></div>}
+          {loading&&<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:300}}><div style={{textAlign:'center'}}><div style={{fontSize:32,marginBottom:12}}>⏳</div><div style={{color:T.muted,fontSize:13}}>Loading your trades...</div></div></div>}
 
           {!loading&&trades.length===0&&page==='dashboard'&&(
             <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:300}}>
               <div style={{textAlign:'center',maxWidth:360}}>
-                <div style={{fontSize:48,marginBottom:16}}>&#128210;</div>
+                <div style={{fontSize:48,marginBottom:16}}>📒</div>
                 <h3 style={{fontSize:18,fontWeight:700,color:T.text,marginBottom:8}}>No trades yet</h3>
                 <p style={{fontSize:13,color:T.muted,marginBottom:24,lineHeight:1.6}}>Log your first trade manually or import from Fidelity or Robinhood CSV.</p>
                 <div style={{display:'flex',gap:10,justifyContent:'center'}}>
-                  <button onClick={()=>setShowCSV(true)} style={BtnGhost}>&#128193; Import CSV</button>
+                  <button onClick={()=>setShowCSV(true)} style={BtnGhost}>📁 Import CSV</button>
                   <button onClick={()=>{setEditTrade(null);setShowTrade(true);}} style={BtnPrimary}>+ Log Trade</button>
                 </div>
               </div>
@@ -521,14 +585,14 @@ export default function TradingJournal({ session }) {
 
           {!loading&&trades.length>0&&page==='dashboard'&&<>
             <div style={{display:'flex',gap:14,marginBottom:20,flexWrap:'wrap'}}>
-              <StatCard label="Total P&L"    value={fmtM(totalPnl)}      color={totalPnl>=0?T.green:T.red} icon="&#128176;"/>
-              <StatCard label="Win Rate"     value={`${winRate.toFixed(1)}%`} sub={`${winners.length}W / ${losers.length}L`} icon="&#127919;"/>
-              <StatCard label="Profit Factor" value={profitFactor.toFixed(2)} sub="Gross profit/loss" icon="&#9889;"/>
-              <StatCard label="Avg Winner"   value={fmtM(avgWin)}  color={T.green} icon="&#8593;"/>
-              <StatCard label="Avg Loser"    value={fmtM(avgLoss)} color={T.red}   icon="&#8595;"/>
-              <StatCard label="Open"         value={openCount}     color={T.blue}  icon="&#128275;"/>
+              <StatCard label="Total P&L"    value={fmtM(totalPnl)}      color={totalPnl>=0?T.green:T.red} icon="💰"/>
+              <StatCard label="Win Rate"     value={`${winRate.toFixed(1)}%`} sub={`${winners.length}W / ${losers.length}L`} icon="🎯"/>
+              <StatCard label="Profit Factor" value={profitFactor.toFixed(2)} sub="Gross profit/loss" icon="⚡"/>
+              <StatCard label="Avg Winner"   value={fmtM(avgWin)}  color={T.green} icon="↑"/>
+              <StatCard label="Avg Loser"    value={fmtM(avgLoss)} color={T.red}   icon="↓"/>
+              <StatCard label="Open"         value={openCount}     color={T.blue}  icon="🔓"/>
             </div>
-            {importedCount>0&&<div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:10,padding:'12px 18px',marginBottom:18,display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{fontSize:13,color:'#a5b4fc'}}>&#10003; {importedCount} trades imported from CSV</span><button onClick={()=>setPage('log')} style={{...BtnGhost,fontSize:11,padding:'5px 12px',color:T.purple,borderColor:'rgba(99,102,241,0.3)'}}>View All &#8594;</button></div>}
+            {importedCount>0&&<div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:10,padding:'12px 18px',marginBottom:18,display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{fontSize:13,color:'#a5b4fc'}}>✅ {importedCount} trades imported from CSV</span><button onClick={()=>setPage('log')} style={{...BtnGhost,fontSize:11,padding:'5px 12px',color:T.purple,borderColor:'rgba(99,102,241,0.3)'}}>View All →</button></div>}
             <div style={{display:'grid',gridTemplateColumns:'1fr 360px',gap:16,marginBottom:16}}>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:24}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -543,7 +607,7 @@ export default function TradingJournal({ session }) {
                   <div key={t.id} onClick={()=>{setEditTrade(t);setShowTrade(true);}} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid #1a2030',cursor:'pointer'}}>
                     <div style={{display:'flex',alignItems:'center',gap:10}}>
                       <div style={{width:34,height:34,borderRadius:8,background:t.direction==='LONG'?'rgba(52,211,153,0.12)':'rgba(248,113,113,0.12)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:800,color:t.direction==='LONG'?T.green:T.red}}>{(t.ticker||'').slice(0,4)}</div>
-                      <div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{t.ticker}</div><div style={{fontSize:11,color:T.muted}}>{t.setup} &#183; {t.entry_date}</div></div>
+                      <div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{t.ticker}</div><div style={{fontSize:11,color:T.muted}}>{t.setup} · {t.entry_date}</div></div>
                     </div>
                     <div>{p!=null?<div style={{fontSize:13,fontWeight:700,color:p>=0?T.green:T.red}}>{fmtM(p)}</div>:<Badge type="OPEN">OPEN</Badge>}</div>
                   </div>
@@ -567,13 +631,13 @@ export default function TradingJournal({ session }) {
 
           {!loading&&page==='log'&&<>
             <div style={{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap',alignItems:'center'}}>
-              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="&#128269;  Search ticker or notes..." style={{...IS,width:220,fontSize:12}}/>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍  Search ticker or notes..." style={{...IS,width:220,fontSize:12}}/>
               {['ALL','LONG','SHORT'].map(d=><button key={d} className="nb" onClick={()=>setFilter(f=>({...f,dir:d}))} style={{padding:'8px 14px',borderRadius:8,border:'1px solid',cursor:'pointer',fontSize:11,fontWeight:600,borderColor:filter.dir===d?'#6366f1':'#2d3748',background:filter.dir===d?'rgba(99,102,241,0.15)':T.panel,color:filter.dir===d?T.purple:T.muted}}>{d}</button>)}
               {['ALL','OPEN','CLOSED'].map(s=><button key={s} className="nb" onClick={()=>setFilter(f=>({...f,status:s}))} style={{padding:'8px 14px',borderRadius:8,border:'1px solid',cursor:'pointer',fontSize:11,fontWeight:600,borderColor:filter.status===s?'#6366f1':'#2d3748',background:filter.status===s?'rgba(99,102,241,0.15)':T.panel,color:filter.status===s?T.purple:T.muted}}>{s}</button>)}
               <select value={sort} onChange={e=>setSort(e.target.value)} style={{...IS,width:'auto',fontSize:11,padding:'8px 14px',cursor:'pointer'}}>
-                <option value="date">Sort: Date &#8595;</option><option value="pnl">Sort: P&L</option><option value="ticker">Sort: Ticker</option>
+                <option value="date">Sort: Date ↓</option><option value="pnl">Sort: P&L</option><option value="ticker">Sort: Ticker</option>
               </select>
-              <button onClick={()=>setShowCSV(true)} style={{...BtnGhost,fontSize:11,padding:'8px 14px',marginLeft:'auto'}}>&#128193; Import CSV</button>
+              <button onClick={()=>setShowCSV(true)} style={{...BtnGhost,fontSize:11,padding:'8px 14px',marginLeft:'auto'}}>📁 Import CSV</button>
             </div>
             <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,overflow:'hidden'}}>
               <div style={{display:'grid',gridTemplateColumns:'90px 56px 90px 90px 60px 108px 108px 100px 80px 110px',padding:'12px 20px',borderBottom:`1px solid ${T.border}`,background:T.sub}}>
@@ -613,7 +677,7 @@ export default function TradingJournal({ session }) {
                 <EquityCurve trades={trades}/>
               </div>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:24}}>
-                <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:16}}>Best &amp; Worst</div>
+                <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:16}}>Best & Worst</div>
                 <div style={{fontSize:11,color:T.muted,marginBottom:10,fontWeight:600,textTransform:'uppercase'}}>Top Winners</div>
                 {[...closed].sort((a,b)=>(pnl(b)||0)-(pnl(a)||0)).slice(0,3).map(t=><div key={t.id} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid #111827',fontSize:12}}><span style={{color:'#94a3b8',fontWeight:600}}>{t.ticker}</span><span style={{color:T.green,fontWeight:700}}>{fmtM(pnl(t))}</span></div>)}
                 <div style={{fontSize:11,color:T.muted,marginTop:14,marginBottom:10,fontWeight:600,textTransform:'uppercase'}}>Top Losers</div>
@@ -623,7 +687,7 @@ export default function TradingJournal({ session }) {
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:24}}>
                 <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:16}}>By Setup</div>
-                {Object.entries(setupPnl).sort((a,b)=>b[1]-a[1]).map(([s,v])=>{const c=closed.filter(t=>t.setup===s);const wr=c.length?c.filter(t=>(pnl(t)||0)>0).length/c.length*100:0;return<div key={s} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 0',borderBottom:'1px solid #111827'}}><div><div style={{fontSize:12,fontWeight:600,color:'#94a3b8'}}>{s}</div><div style={{fontSize:11,color:T.muted}}>{c.length} trades &#183; {wr.toFixed(0)}% WR</div></div><span style={{fontSize:13,fontWeight:700,color:v>=0?T.green:T.red}}>{fmtM(v)}</span></div>;})}
+                {Object.entries(setupPnl).sort((a,b)=>b[1]-a[1]).map(([s,v])=>{const c=closed.filter(t=>t.setup===s);const wr=c.length?c.filter(t=>(pnl(t)||0)>0).length/c.length*100:0;return<div key={s} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 0',borderBottom:'1px solid #111827'}}><div><div style={{fontSize:12,fontWeight:600,color:'#94a3b8'}}>{s}</div><div style={{fontSize:11,color:T.muted}}>{c.length} trades · {wr.toFixed(0)}% WR</div></div><span style={{fontSize:13,fontWeight:700,color:v>=0?T.green:T.red}}>{fmtM(v)}</span></div>;})}
               </div>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:24}}>
                 <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:16}}>By Ticker</div>
@@ -637,12 +701,12 @@ export default function TradingJournal({ session }) {
               <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:4}}>Emotion Tracker</div>
               <div style={{fontSize:12,color:T.muted,marginBottom:24}}>How your emotional state correlates with P&L</div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
-                {Object.entries(emotionPnl).sort((a,b)=>b[1]-a[1]).map(([e,v])=>{const emo={Confident:'&#128526;',Neutral:'&#128528;',Excited:'&#129321;',Fearful:'&#128552;',Frustrated:'&#128548;',Calm:'&#129496;'};const cnt=closed.filter(t=>t.emotion===e).length;return<div key={e} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:10,padding:'18px 20px'}}><div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}><span style={{fontSize:24}} dangerouslySetInnerHTML={{__html:emo[e]||e[0]}}/><div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{e}</div><div style={{fontSize:11,color:T.muted}}>{cnt} trades</div></div></div><div style={{fontSize:18,fontWeight:700,color:v>=0?T.green:T.red}}>{fmtM(v)}</div></div>;})}
+                {Object.entries(emotionPnl).sort((a,b)=>b[1]-a[1]).map(([e,v])=>{const emo={Confident:'😎',Neutral:'😐',Excited:'🤩',Fearful:'😨',Frustrated:'😤',Calm:'🧘'};const cnt=closed.filter(t=>t.emotion===e).length;return<div key={e} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:10,padding:'18px 20px'}}><div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}><span style={{fontSize:24}}>{emo[e]||e[0]}</span><div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{e}</div><div style={{fontSize:11,color:T.muted}}>{cnt} trades</div></div></div><div style={{fontSize:18,fontWeight:700,color:v>=0?T.green:T.red}}>{fmtM(v)}</div></div>;})}
               </div>
             </div>
             <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:28}}>
               <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:20}}>Trade Notes</div>
-              {closed.filter(t=>t.notes).map(t=>{const p=pnl(t);return<div key={t.id} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:10,padding:20,marginBottom:12}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}><div style={{display:'flex',gap:12,alignItems:'center'}}><div style={{width:38,height:38,borderRadius:9,background:t.direction==='LONG'?'rgba(52,211,153,0.12)':'rgba(248,113,113,0.12)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:800,color:t.direction==='LONG'?T.green:T.red}}>{t.ticker}</div><div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{t.ticker} &#183; {t.setup}</div><div style={{fontSize:11,color:T.muted}}>{t.entry_date} &#8594; {t.exit_date}</div></div></div><span style={{fontSize:14,fontWeight:700,color:p>=0?T.green:T.red}}>{fmtM(p)}</span></div><p style={{fontSize:13,color:'#94a3b8',lineHeight:1.6,borderLeft:'2px solid #1e2535',paddingLeft:14,margin:0}}>{t.notes}</p></div>;})}
+              {closed.filter(t=>t.notes).map(t=>{const p=pnl(t);return<div key={t.id} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:10,padding:20,marginBottom:12}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}><div style={{display:'flex',gap:12,alignItems:'center'}}><div style={{width:38,height:38,borderRadius:9,background:t.direction==='LONG'?'rgba(52,211,153,0.12)':'rgba(248,113,113,0.12)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:800,color:t.direction==='LONG'?T.green:T.red}}>{t.ticker}</div><div><div style={{fontSize:13,fontWeight:600,color:T.text}}>{t.ticker} · {t.setup}</div><div style={{fontSize:11,color:T.muted}}>{t.entry_date} → {t.exit_date}</div></div></div><span style={{fontSize:14,fontWeight:700,color:p>=0?T.green:T.red}}>{fmtM(p)}</span></div><p style={{fontSize:13,color:'#94a3b8',lineHeight:1.6,borderLeft:'2px solid #1e2535',paddingLeft:14,margin:0}}>{t.notes}</p></div>;})}
             </div>
           </>}
 
@@ -650,14 +714,14 @@ export default function TradingJournal({ session }) {
             <div style={{display:'grid',gridTemplateColumns:'1fr 300px',gap:16}}>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:28}}>
                 <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:4}}>P&L Calendar</div>
-                <div style={{fontSize:12,color:T.muted,marginBottom:24}}>Green = profit &#183; Red = loss &#183; Intensity = magnitude</div>
+                <div style={{fontSize:12,color:T.muted,marginBottom:24}}>Green = profit · Red = loss · Intensity = magnitude</div>
                 <PnLCalendar trades={trades}/>
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:14}}>
-                <StatCard label="Total P&L"      value={fmtM(totalPnl)} color={T.green}/>
-                <StatCard label="Trading Days"    value={new Set(closed.map(t=>t.exit_date)).size}/>
-                <StatCard label="Closed Trades"   value={closed.length}/>
-                <StatCard label="Open Positions"  value={openCount} color={T.blue}/>
+                <StatCard label="Total P&L"     value={fmtM(totalPnl)} color={T.green}/>
+                <StatCard label="Trading Days"   value={new Set(closed.map(t=>t.exit_date)).size}/>
+                <StatCard label="Closed Trades"  value={closed.length}/>
+                <StatCard label="Open Positions" value={openCount} color={T.blue}/>
               </div>
             </div>
           )}
@@ -666,22 +730,25 @@ export default function TradingJournal({ session }) {
             <div style={{maxWidth:680}}>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:28,marginBottom:16}}>
                 <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:4}}>Import from CSV</div>
-                <div style={{fontSize:12,color:T.muted,marginBottom:24}}>Upload your Fidelity or Robinhood export &#8212; trades saved to your account</div>
-                {[{name:'Fidelity',icon:'&#127974;',steps:['Log in &#8594; Accounts &amp; Trade &#8594; Activity &amp; Orders &#8594; History','Select date range &#8594; Download CSV','Import below']},{name:'Robinhood',icon:'&#129001;',steps:['Account &#8594; Statements &amp; History &#8594; History','Select date range &#8594; Export CSV','Import below']}].map(b=>(
+                <div style={{fontSize:12,color:T.muted,marginBottom:24}}>Upload your Fidelity or Robinhood export — trades saved to your account</div>
+                {[
+                  {name:'Fidelity',icon:'🏦',steps:['Log in → Accounts & Trade → Activity & Orders → History','Select date range → Download CSV','Import below']},
+                  {name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV','Import below']},
+                ].map(b=>(
                   <div key={b.name} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:12,padding:20,marginBottom:12}}>
                     <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16}}>
                       <div style={{flex:1}}>
-                        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><span style={{fontSize:24}} dangerouslySetInnerHTML={{__html:b.icon}}/><div style={{fontSize:14,fontWeight:700,color:T.text}}>{b.name}</div></div>
-                        <ol style={{paddingLeft:18,margin:0}}>{b.steps.map((s,i)=><li key={i} style={{fontSize:12,color:T.muted,marginBottom:4,lineHeight:1.5}} dangerouslySetInnerHTML={{__html:s}}/>)}</ol>
+                        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><span style={{fontSize:24}}>{b.icon}</span><div style={{fontSize:14,fontWeight:700,color:T.text}}>{b.name}</div></div>
+                        <ol style={{paddingLeft:18,margin:0}}>{b.steps.map((s,i)=><li key={i} style={{fontSize:12,color:T.muted,marginBottom:4,lineHeight:1.5}}>{s}</li>)}</ol>
                       </div>
-                      <button onClick={()=>setShowCSV(true)} style={{...BtnPrimary,whiteSpace:'nowrap',flexShrink:0}}>Import &#8594;</button>
+                      <button onClick={()=>setShowCSV(true)} style={{...BtnPrimary,whiteSpace:'nowrap',flexShrink:0}}>Import →</button>
                     </div>
                   </div>
                 ))}
               </div>
               <div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:12,padding:20}}>
-                <div style={{fontSize:13,fontWeight:600,color:'#818cf8',marginBottom:6}}>&#128640; Auto-Sync Coming in Phase 3</div>
-                <div style={{fontSize:12,color:T.muted,lineHeight:1.7}}>Phase 3 will connect directly to Robinhood API and Fidelity OAuth &#8212; no CSV export needed.</div>
+                <div style={{fontSize:13,fontWeight:600,color:'#818cf8',marginBottom:6}}>🚀 Auto-Sync Coming in Phase 3</div>
+                <div style={{fontSize:12,color:T.muted,lineHeight:1.7}}>Phase 3 will connect directly to Robinhood API and Fidelity OAuth — no CSV export needed.</div>
               </div>
             </div>
           )}
