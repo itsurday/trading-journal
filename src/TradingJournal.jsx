@@ -6,10 +6,10 @@ const EMOTIONS = ["Confident","Neutral","Excited","Fearful","Frustrated","Calm"]
 const ALL_TAGS = ["momentum","reversal","earnings","tech","hedge","index","breakout","swing"];
 
 const FIDELITY_SAMPLE = `Run Date,Account,Account Number,Action,Symbol,Description,Type,Price ($),Quantity,Commission ($),Fees ($),Accrued Interest ($),Amount ($),Settlement Date
-03/11/2026,"Individual - TOD","Z12345","YOU BOUGHT",AAPL,"APPLE INC",Cash,182.50,50,,,,−9125.00,03/13/2026
+03/11/2026,"Individual - TOD","Z12345","YOU BOUGHT",AAPL,"APPLE INC",Cash,182.50,50,,,,9125.00,03/13/2026
 03/18/2026,"Individual - TOD","Z12345","YOU SOLD",AAPL,"APPLE INC",Cash,191.20,50,,,,9560.00,03/20/2026
 03/05/2026,"Individual - TOD","Z12345","YOU SOLD SHORT SALE TSLA (Short)",TSLA,"TESLA INC",Short,175.00,-25,,,,4375.00,03/07/2026
-03/12/2026,"Individual - TOD","Z12345","YOU BOUGHT TO COVER",TSLA,"TESLA INC",Short,162.30,25,,,,−4057.50,03/14/2026`;
+03/12/2026,"Individual - TOD","Z12345","YOU BOUGHT TO COVER",TSLA,"TESLA INC",Short,162.30,25,,,,4057.50,03/14/2026`;
 
 const ROBINHOOD_SAMPLE = `symbol,date,order type,side,fees,quantity,average price
 AAPL,2026-05-01T09:35:00Z,market,buy,0,50,182.50
@@ -19,7 +19,6 @@ TSLA,2026-05-12T11:45:00Z,market,buy,0,30,162.30
 NVDA,2026-05-10T09:31:00Z,market,buy,0,20,875.00
 NVDA,2026-05-18T15:55:00Z,market,sell,0,20,920.50`;
 
-// ─── CSV Parsing ──────────────────────────────────────────────────────────
 function parseCSVLine(line) {
   const result = []; let cur = "", inQ = false;
   for (let i = 0; i < line.length; i++) {
@@ -31,42 +30,20 @@ function parseCSVLine(line) {
 }
 
 function parseCSV(text) {
-  // Strip BOM, normalize line endings
   const clean = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const allLines = clean.split('\n');
-
-  // Find the header line — the first line containing a comma that looks like headers
-  // Fidelity files have blank lines at the top before the real header row
   let headerIdx = -1;
   for (let i = 0; i < allLines.length; i++) {
     const l = allLines[i].trim();
-    if (l && l.toLowerCase().includes('run date') && l.toLowerCase().includes('action')) {
-      headerIdx = i; break;
-    }
-    // Robinhood: look for 'symbol' and 'side'
-    if (l && l.toLowerCase().includes('symbol') && l.toLowerCase().includes('side')) {
-      headerIdx = i; break;
-    }
+    if (l && l.toLowerCase().includes('run date') && l.toLowerCase().includes('action')) { headerIdx = i; break; }
+    if (l && l.toLowerCase().includes('symbol') && l.toLowerCase().includes('side')) { headerIdx = i; break; }
   }
-  if (headerIdx === -1) {
-    // fallback: first non-empty line
-    headerIdx = allLines.findIndex(l => l.trim().length > 0);
-  }
-
-  const headerLine = allLines[headerIdx];
-  const headers = parseCSVLine(headerLine).map(h =>
-    h.toLowerCase().replace(/[$()]/g,'').replace(/\s+/g,' ').trim()
-  );
-
-  // Data rows: only lines after the header that start with a date pattern (MM/DD/YYYY)
-  // This automatically skips the disclaimer block at the bottom of Fidelity files
+  if (headerIdx === -1) headerIdx = allLines.findIndex(l => l.trim().length > 0);
+  const headers = parseCSVLine(allLines[headerIdx]).map(h => h.toLowerCase().replace(/[$()]/g,'').replace(/\s+/g,' ').trim());
   const rows = [];
   for (let i = headerIdx + 1; i < allLines.length; i++) {
     const l = allLines[i].trim();
     if (!l) continue;
-    // Fidelity data rows always start with a date like 03/11/2026
-    // Robinhood rows start with a ticker symbol
-    // Disclaimer rows start with quotes or words — skip them
     if (!l.match(/^["']?\d{1,2}\/\d{1,2}\/\d{4}/) && !l.match(/^[A-Z]{1,6},/)) continue;
     const vals = parseCSVLine(l);
     rows.push(Object.fromEntries(headers.map((h, i) => [h, (vals[i] || '').trim()])));
@@ -91,39 +68,24 @@ function toISO(dateStr) {
 }
 
 function cleanNum(s) {
-  // Handle various number formats including unicode minus sign and parentheses for negatives
   if (!s) return 0;
-  const cleaned = s.replace(/[^\d.\-]/g, '').replace(/−/g, '-');
-  return parseFloat(cleaned) || 0;
+  return parseFloat(s.replace(/[^\d.\-]/g, '').replace(/\u2212/g, '-')) || 0;
 }
 
 function parseFidelity(rows) {
   const buys = {}, sells = {};
   rows.forEach(r => {
-    // Action field may contain verbose descriptions like
-    // "YOU SOLD SHORT SALE SANDISK CORP COM (SNDK) (Short)"
-    // "YOU BOUGHT TO COVER"
-    // "YOU BOUGHT"
-    // "YOU SOLD"
     const action = (r['action'] || '').toLowerCase();
     const sym    = (r['symbol'] || '').trim().toUpperCase();
     if (!sym || sym.length > 6 || !sym.match(/^[A-Z]/)) return;
-
-    // In the real Fidelity export: Price ($) comes before Quantity
-    // Column header normalised to 'price' and 'quantity'
     const price = Math.abs(cleanNum(r['price'] || r['price '] || ''));
-    // Quantity can be negative (sells shown as -25), take absolute value
     const qty   = Math.abs(cleanNum(r['quantity'] || ''));
     const date  = toISO(r['run date'] || r['settlement date'] || '');
-
     if (!price || !qty || !date) return;
-
-    // Classify the action — order matters (check more specific first)
     const isShortCover = action.includes('cover');
     const isShortSell  = action.includes('short') && action.includes('sold') && !isShortCover;
     const isBuy        = action.includes('bought') && !isShortCover;
-    const isSell       = action.includes('sold')   && !isShortSell && !isShortCover;
-
+    const isSell       = action.includes('sold') && !isShortSell && !isShortCover;
     const entry = { sym, qty, price, date };
     if (isBuy)        { (buys[sym]  = buys[sym] ||[]).push({...entry, direction:'LONG'});  }
     if (isSell)       { (sells[sym] = sells[sym]||[]).push({...entry, direction:'LONG'});  }
@@ -156,15 +118,27 @@ function matchLegs(buys, sells) {
     const buyList  = (buys[sym] ||[]).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
     const sellList = (sells[sym]||[]).slice().sort((a,b)=>new Date(a.date)-new Date(b.date));
     const usedSells = new Array(sellList.length).fill(false);
-    buyList.forEach(buy => {
+    const usedBuys  = new Array(buyList.length).fill(false);
+
+    // FIFO match buy legs to sell legs
+    buyList.forEach((buy, bi) => {
       const matchIdx = sellList.findIndex((sell,i) => !usedSells[i] && new Date(sell.date) >= new Date(buy.date));
       if (matchIdx !== -1) {
         usedSells[matchIdx] = true;
+        usedBuys[bi] = true;
         const sell = sellList[matchIdx], isLong = buy.direction === 'LONG';
         trades.push({ ticker:sym, direction:isLong?'LONG':'SHORT', entry_price:isLong?buy.price:sell.price, exit_price:isLong?sell.price:buy.price, quantity:Math.min(buy.qty,sell.qty), entry_date:isLong?buy.date:sell.date, exit_date:isLong?sell.date:buy.date, status:'CLOSED', setup:'Imported', emotion:'Neutral', notes:'', tags:[], imported:true });
-      } else {
-        trades.push({ ticker:sym, direction:buy.direction==='LONG'?'LONG':'SHORT', entry_price:buy.price, exit_price:null, quantity:buy.qty, entry_date:buy.date, exit_date:null, status:'OPEN', setup:'Imported', emotion:'Neutral', notes:'', tags:[], imported:true });
       }
+    });
+
+    // Unmatched buys = open LONG positions
+    buyList.forEach((buy, bi) => {
+      if (!usedBuys[bi]) trades.push({ ticker:sym, direction:'LONG', entry_price:buy.price, exit_price:null, quantity:buy.qty, entry_date:buy.date, exit_date:null, status:'OPEN', setup:'Imported', emotion:'Neutral', notes:'', tags:[], imported:true });
+    });
+
+    // Unmatched sells = open SHORT positions (short-sold but not yet covered)
+    sellList.forEach((sell, si) => {
+      if (!usedSells[si]) trades.push({ ticker:sym, direction:'SHORT', entry_price:sell.price, exit_price:null, quantity:sell.qty, entry_date:sell.date, exit_date:null, status:'OPEN', setup:'Imported', emotion:'Neutral', notes:'', tags:[], imported:true });
     });
   });
   return trades;
@@ -326,7 +300,7 @@ function CSVImportModal({ existingTrades, onImport, onClose }) {
       <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:20,width:'100%',maxWidth:720,maxHeight:'93vh',overflowY:'auto',display:'flex',flexDirection:'column'}}>
         <div style={{padding:'28px 32px 20px',borderBottom:`1px solid ${T.border}`}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:20}}>
-            <div><h2 style={{margin:0,fontSize:20,fontWeight:700,color:T.text}}>Import Trades from CSV</h2><p style={{margin:'5px 0 0',fontSize:13,color:T.muted}}>Supports Fidelity and Robinhood &#183; Saved to your account</p></div>
+            <div><h2 style={{margin:0,fontSize:20,fontWeight:700,color:T.text}}>Import Trades from CSV</h2><p style={{margin:'5px 0 0',fontSize:13,color:T.muted}}>Supports Fidelity and Robinhood · Saved to your account</p></div>
             <button onClick={onClose} style={{background:'none',border:'none',color:T.muted,fontSize:22,cursor:'pointer'}}>&#x2715;</button>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:6}}>
@@ -336,10 +310,7 @@ function CSVImportModal({ existingTrades, onImport, onClose }) {
         <div style={{padding:32,flex:1}}>
           {step==='upload'&&<>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:24}}>
-              {[
-                {id:'fidelity',name:'Fidelity',icon:'🏦',steps:['Accounts & Trade → Activity & Orders → History','Select date range → Download CSV'],headers:'Run Date, Account Number, Action, Symbol, Price ($), Quantity...'},
-                {id:'robinhood',name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV'],headers:'symbol, date, side, quantity, average price...'}
-              ].map(b=>(
+              {[{id:'fidelity',name:'Fidelity',icon:'🏦',steps:['Accounts & Trade → Activity & Orders → History','Select date range → Download CSV'],headers:'Run Date, Account Number, Action, Symbol, Price ($), Quantity...'},{id:'robinhood',name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV'],headers:'symbol, date, side, quantity, average price...'}].map(b=>(
                 <div key={b.id} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:12,padding:18}}>
                   <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}><span style={{fontSize:22}}>{b.icon}</span><div style={{fontSize:14,fontWeight:700,color:T.text}}>{b.name}</div></div>
                   <ol style={{paddingLeft:16,margin:0}}>{b.steps.map((s,i)=><li key={i} style={{fontSize:11,color:T.muted,marginBottom:4,lineHeight:1.5}}>{s}</li>)}</ol>
@@ -484,27 +455,9 @@ export default function TradingJournal({ session }) {
   };
   const signOut = () => supabase.auth.signOut();
 
-  const closed       = trades.filter(t=>t.status==='CLOSED');
-  const totalPnl     = closed.reduce((s,t)=>s+(pnl(t)||0),0);
-  const winners      = closed.filter(t=>(pnl(t)||0)>0);
-  const losers       = closed.filter(t=>(pnl(t)||0)<0);
-  const winRate      = closed.length?(winners.length/closed.length*100):0;
-  const avgWin       = winners.length?winners.reduce((s,t)=>s+(pnl(t)||0),0)/winners.length:0;
-  const avgLoss      = losers.length?losers.reduce((s,t)=>s+(pnl(t)||0),0)/losers.length:0;
-  const profitFactor = Math.abs(avgLoss)>0?Math.abs(avgWin/avgLoss):0;
-  const openCount    = trades.filter(t=>t.status==='OPEN').length;
-  const importedCount= trades.filter(t=>t.imported).length;
+  const closed=trades.filter(t=>t.status==='CLOSED'), totalPnl=closed.reduce((s,t)=>s+(pnl(t)||0),0), winners=closed.filter(t=>(pnl(t)||0)>0), losers=closed.filter(t=>(pnl(t)||0)<0), winRate=closed.length?(winners.length/closed.length*100):0, avgWin=winners.length?winners.reduce((s,t)=>s+(pnl(t)||0),0)/winners.length:0, avgLoss=losers.length?losers.reduce((s,t)=>s+(pnl(t)||0),0)/losers.length:0, profitFactor=Math.abs(avgLoss)>0?Math.abs(avgWin/avgLoss):0, openCount=trades.filter(t=>t.status==='OPEN').length, importedCount=trades.filter(t=>t.imported).length;
 
-  const filtered = useMemo(()=>{
-    let arr=[...trades];
-    if(filter.dir!=='ALL') arr=arr.filter(t=>t.direction===filter.dir);
-    if(filter.status!=='ALL') arr=arr.filter(t=>t.status===filter.status);
-    if(search) arr=arr.filter(t=>t.ticker?.includes(search.toUpperCase())||t.notes?.toLowerCase().includes(search.toLowerCase()));
-    if(sort==='date') arr.sort((a,b)=>new Date(b.entry_date)-new Date(a.entry_date));
-    if(sort==='pnl') arr.sort((a,b)=>(pnl(b)||0)-(pnl(a)||0));
-    if(sort==='ticker') arr.sort((a,b)=>(a.ticker||'').localeCompare(b.ticker||''));
-    return arr;
-  },[trades,filter,sort,search]);
+  const filtered=useMemo(()=>{let arr=[...trades];if(filter.dir!=='ALL')arr=arr.filter(t=>t.direction===filter.dir);if(filter.status!=='ALL')arr=arr.filter(t=>t.status===filter.status);if(search)arr=arr.filter(t=>t.ticker?.includes(search.toUpperCase())||t.notes?.toLowerCase().includes(search.toLowerCase()));if(sort==='date')arr.sort((a,b)=>new Date(b.entry_date)-new Date(a.entry_date));if(sort==='pnl')arr.sort((a,b)=>(pnl(b)||0)-(pnl(a)||0));if(sort==='ticker')arr.sort((a,b)=>(a.ticker||'').localeCompare(b.ticker||''));return arr;},[trades,filter,sort,search]);
 
   const setupPnl={},emotionPnl={};
   closed.forEach(t=>{setupPnl[t.setup]=(setupPnl[t.setup]||0)+(pnl(t)||0);emotionPnl[t.emotion]=(emotionPnl[t.emotion]||0)+(pnl(t)||0);});
@@ -537,27 +490,20 @@ export default function TradingJournal({ session }) {
         <div style={{padding:'12px 8px 16px',borderTop:`1px solid ${T.border}`}}>
           <div style={{background:T.panel,borderRadius:10,padding:12}}>
             <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
-              <div style={{width:30,height:30,borderRadius:'50%',background:'linear-gradient(135deg,#6366f1,#06b6d4)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:700,flexShrink:0,color:'#fff'}}>
-                {(user?.email?.[0]||'U').toUpperCase()}
-              </div>
+              <div style={{width:30,height:30,borderRadius:'50%',background:'linear-gradient(135deg,#6366f1,#06b6d4)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:700,flexShrink:0,color:'#fff'}}>{(user?.email?.[0]||'U').toUpperCase()}</div>
               <div style={{minWidth:0}}>
                 <div style={{fontSize:11,fontWeight:600,color:T.text,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:130}}>{user?.email}</div>
                 <div style={{fontSize:10,color:T.dim}}>{trades.length} trades</div>
               </div>
             </div>
-            <button className="so-btn" onClick={signOut} style={{width:'100%',background:'none',border:`1px solid ${T.border}`,borderRadius:7,color:T.muted,fontSize:11,fontWeight:600,padding:'7px 0',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,transition:'all .15s'}}>
-              Sign Out
-            </button>
+            <button className="so-btn" onClick={signOut} style={{width:'100%',background:'none',border:`1px solid ${T.border}`,borderRadius:7,color:T.muted,fontSize:11,fontWeight:600,padding:'7px 0',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,transition:'all .15s'}}>Sign Out</button>
           </div>
         </div>
       </aside>
 
       <main style={{flex:1,overflow:'auto',display:'flex',flexDirection:'column'}}>
         <div style={{background:T.sub,borderBottom:`1px solid ${T.border}`,padding:'14px 28px',display:'flex',alignItems:'center',justifyContent:'space-between',flexShrink:0}}>
-          <div>
-            <h1 style={{fontSize:18,fontWeight:700,color:T.text,letterSpacing:'-0.02em'}}>{PAGES[page]}</h1>
-            <p style={{fontSize:12,color:T.muted,marginTop:2}}>{SUBS[page]}</p>
-          </div>
+          <div><h1 style={{fontSize:18,fontWeight:700,color:T.text,letterSpacing:'-0.02em'}}>{PAGES[page]}</h1><p style={{fontSize:12,color:T.muted,marginTop:2}}>{SUBS[page]}</p></div>
           <div style={{display:'flex',gap:10}}>
             <button onClick={()=>setShowCSV(true)} style={{...BtnGhost,display:'flex',alignItems:'center',gap:6,fontSize:12,padding:'9px 16px'}}>📁 Import CSV</button>
             <button onClick={()=>{setEditTrade(null);setShowTrade(true);}} style={{...BtnPrimary,display:'flex',alignItems:'center',gap:6,padding:'9px 18px'}}>+ Log Trade</button>
@@ -585,12 +531,12 @@ export default function TradingJournal({ session }) {
 
           {!loading&&trades.length>0&&page==='dashboard'&&<>
             <div style={{display:'flex',gap:14,marginBottom:20,flexWrap:'wrap'}}>
-              <StatCard label="Total P&L"    value={fmtM(totalPnl)}      color={totalPnl>=0?T.green:T.red} icon="💰"/>
-              <StatCard label="Win Rate"     value={`${winRate.toFixed(1)}%`} sub={`${winners.length}W / ${losers.length}L`} icon="🎯"/>
+              <StatCard label="Total P&L" value={fmtM(totalPnl)} color={totalPnl>=0?T.green:T.red} icon="💰"/>
+              <StatCard label="Win Rate" value={`${winRate.toFixed(1)}%`} sub={`${winners.length}W / ${losers.length}L`} icon="🎯"/>
               <StatCard label="Profit Factor" value={profitFactor.toFixed(2)} sub="Gross profit/loss" icon="⚡"/>
-              <StatCard label="Avg Winner"   value={fmtM(avgWin)}  color={T.green} icon="↑"/>
-              <StatCard label="Avg Loser"    value={fmtM(avgLoss)} color={T.red}   icon="↓"/>
-              <StatCard label="Open"         value={openCount}     color={T.blue}  icon="🔓"/>
+              <StatCard label="Avg Winner" value={fmtM(avgWin)} color={T.green} icon="↑"/>
+              <StatCard label="Avg Loser" value={fmtM(avgLoss)} color={T.red} icon="↓"/>
+              <StatCard label="Open" value={openCount} color={T.blue} icon="🔓"/>
             </div>
             {importedCount>0&&<div style={{background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.2)',borderRadius:10,padding:'12px 18px',marginBottom:18,display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{fontSize:13,color:'#a5b4fc'}}>✅ {importedCount} trades imported from CSV</span><button onClick={()=>setPage('log')} style={{...BtnGhost,fontSize:11,padding:'5px 12px',color:T.purple,borderColor:'rgba(99,102,241,0.3)'}}>View All →</button></div>}
             <div style={{display:'grid',gridTemplateColumns:'1fr 360px',gap:16,marginBottom:16}}>
@@ -663,12 +609,12 @@ export default function TradingJournal({ session }) {
 
           {!loading&&page==='analytics'&&<>
             <div style={{display:'flex',gap:14,marginBottom:20,flexWrap:'wrap'}}>
-              <StatCard label="Total P&L"    value={fmtM(totalPnl)} color={totalPnl>=0?T.green:T.red}/>
-              <StatCard label="Win Rate"     value={`${winRate.toFixed(1)}%`} sub={`${winners.length} of ${closed.length}`}/>
+              <StatCard label="Total P&L" value={fmtM(totalPnl)} color={totalPnl>=0?T.green:T.red}/>
+              <StatCard label="Win Rate" value={`${winRate.toFixed(1)}%`} sub={`${winners.length} of ${closed.length}`}/>
               <StatCard label="Profit Factor" value={profitFactor.toFixed(2)}/>
-              <StatCard label="Avg Win"      value={fmtM(avgWin)}  color={T.green}/>
-              <StatCard label="Avg Loss"     value={fmtM(avgLoss)} color={T.red}/>
-              <StatCard label="Expectancy"   value={fmtM((winRate/100)*avgWin+(1-winRate/100)*avgLoss)} sub="Per trade"/>
+              <StatCard label="Avg Win" value={fmtM(avgWin)} color={T.green}/>
+              <StatCard label="Avg Loss" value={fmtM(avgLoss)} color={T.red}/>
+              <StatCard label="Expectancy" value={fmtM((winRate/100)*avgWin+(1-winRate/100)*avgLoss)} sub="Per trade"/>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:16}}>
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:24}}>
@@ -718,9 +664,9 @@ export default function TradingJournal({ session }) {
                 <PnLCalendar trades={trades}/>
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:14}}>
-                <StatCard label="Total P&L"     value={fmtM(totalPnl)} color={T.green}/>
-                <StatCard label="Trading Days"   value={new Set(closed.map(t=>t.exit_date)).size}/>
-                <StatCard label="Closed Trades"  value={closed.length}/>
+                <StatCard label="Total P&L" value={fmtM(totalPnl)} color={T.green}/>
+                <StatCard label="Trading Days" value={new Set(closed.map(t=>t.exit_date)).size}/>
+                <StatCard label="Closed Trades" value={closed.length}/>
                 <StatCard label="Open Positions" value={openCount} color={T.blue}/>
               </div>
             </div>
@@ -731,10 +677,7 @@ export default function TradingJournal({ session }) {
               <div style={{background:T.panel,border:`1px solid ${T.border}`,borderRadius:12,padding:28,marginBottom:16}}>
                 <div style={{fontSize:15,fontWeight:700,color:T.text,marginBottom:4}}>Import from CSV</div>
                 <div style={{fontSize:12,color:T.muted,marginBottom:24}}>Upload your Fidelity or Robinhood export — trades saved to your account</div>
-                {[
-                  {name:'Fidelity',icon:'🏦',steps:['Log in → Accounts & Trade → Activity & Orders → History','Select date range → Download CSV','Import below']},
-                  {name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV','Import below']},
-                ].map(b=>(
+                {[{name:'Fidelity',icon:'🏦',steps:['Log in → Accounts & Trade → Activity & Orders → History','Select date range → Download CSV','Import below']},{name:'Robinhood',icon:'🟢',steps:['Account → Statements & History → History','Select date range → Export CSV','Import below']}].map(b=>(
                   <div key={b.name} style={{background:T.sub,border:`1px solid ${T.border}`,borderRadius:12,padding:20,marginBottom:12}}>
                     <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:16}}>
                       <div style={{flex:1}}>
